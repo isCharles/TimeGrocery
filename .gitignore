@@ -11,7 +11,7 @@ src/main/resources/tokens.txt
 tokens.txt
 .env
 *.env
-
+/AGENTS.md
 ### STS ###
 .apt_generated
 .classpath
@@ -39,3 +39,4 @@ build/
 
 ### VS Code ###
 .vscode/
+
