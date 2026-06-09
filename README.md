@@ -1,95 +1,189 @@
 # 时光杂货铺
 
-基于 Spring Boot 2.3 的点评/秒杀练习项目。项目在原有 Redis 秒杀方案上，补充了 RocketMQ 异步下单链路，并接入 Spring Boot Actuator、Micrometer、Prometheus 和 Grafana，用于观察接口、JVM 和应用运行状态。
+时光杂货铺是一个基于 Spring Boot 的城市小店探店与限时权益平台。项目围绕店铺浏览、附近推荐、限时抢购、异步下单、多级缓存和系统监控展开，适合作为 Java 后端高并发与全栈展示项目。
 
-## 核心优化
-
-### RocketMQ 秒杀异步化
-
-秒杀接口不再直接在请求线程里完成所有数据库写入，而是拆成两段：
-
-1. `seckill.lua` 在 Redis 中原子判断库存和一人一单，并预扣 Redis 库存。
-2. 请求线程生成订单号，将订单消息投递到 RocketMQ 的 `seckill_order_topic`。
-3. `VoucherOrderConsumer` 消费消息，异步创建订单并扣减 MySQL 库存。
-4. 如果 RocketMQ 投递失败，`seckill_rollback.lua` 会回滚 Redis 的预扣库存和用户占位。
-
-这条链路的目标是把高并发入口尽量压到 Redis 和 MQ 上，减少请求线程直接打 MySQL 的压力，同时保留 MySQL 唯一索引/库存扣减作为最终保护。
-
-相关文件：
-
-- `src/main/java/com/hmdp/service/impl/VoucherOrderServiceImpl.java`
-- `src/main/java/com/hmdp/mq/VoucherOrderConsumer.java`
-- `src/main/resources/seckill.lua`
-- `src/main/resources/seckill_rollback.lua`
-- `docker-compose.yml`
-- `docker/rocketmq/broker.conf`
-
-### Prometheus + Grafana 监控
-
-项目接入了 Actuator 和 Micrometer Prometheus registry：
-
-- Spring Boot 暴露 `/actuator/health`、`/actuator/metrics`、`/actuator/prometheus`
-- Prometheus 每 5 秒抓取一次应用指标
-- Grafana 自动配置 Prometheus 数据源
-
-相关文件：
-
-- `src/main/resources/application.yaml`
-- `docker/prometheus/prometheus.yml`
-- `docker/grafana/provisioning/datasources/prometheus.yml`
-- `docker-compose.yml`
+仓库在原有点评/秒杀业务基础上补充了消费端 Vue 页面、RocketMQ 异步下单链路、Caffeine + Redis 多级缓存观测、Prometheus + Grafana 监控和 JMeter/Node 压测脚本。前端当前使用 Mock 数据，重点用于 GitHub、简历和项目答辩中的产品化展示。
 
 ## 技术栈
 
-- Java 8
-- Spring Boot 2.3.12.RELEASE
+**后端**
+
+- Spring Boot 2.3
 - MyBatis-Plus
-- MySQL 5.x/8.x
+- MySQL
 - Redis
-- Redisson
-- RocketMQ 4.9.7
-- Spring Boot Actuator
-- Micrometer Prometheus
+- Caffeine
+- RocketMQ
+- Lua
+- JWT
+- Nginx
+
+**前端**
+
+- Vue3
+- Vite
+- Element Plus
+
+**监控与压测**
+
 - Prometheus
 - Grafana
+- JMeter
+- Node.js 压测脚本
 
-## 环境准备
+## 核心功能
 
-本项目需要本机或容器中可访问以下服务：
+- 用户登录与认证
+- 店铺查询与详情浏览
+- 附近店铺推荐
+- 限时权益抢购
+- Redis Lua 原子库存预扣
+- RocketMQ 异步下单
+- 消费端幂等与失败回滚
+- Caffeine + Redis 多级缓存
+- Bitmap 签到
+- HyperLogLog UV 统计
+- Prometheus + Grafana 监控
+- JMeter/脚本压测验证
 
-- MySQL：默认 `127.0.0.1:3306`
-- Redis：默认 `localhost:6379`
-- RocketMQ：默认 `127.0.0.1:9876`
+## 前端展示
 
-其中 RocketMQ、Prometheus、Grafana 可以直接通过 `docker-compose.yml` 启动。MySQL 和 Redis 需要你自行准备，或者按自己的环境修改配置。
+新增 `frontend` 目录提供消费端页面，不做传统后台管理系统，不堆 CRUD 表格。
 
-初始化数据库：
+- 首页：项目名、搜索框、分类入口、推荐店铺、限时权益活动区
+- 店铺列表页：店铺卡片、距离、评分、人均消费、标签、距离/热度排序 UI
+- 店铺详情页：店铺基础信息、地址、距离、评分、热门评论、限时权益入口
+- 限时权益抢购页：权益卡片、库存进度条、倒计时、抢购按钮、结果提示
+- 用户中心页：我的订单、我的签到、浏览记录、UV/活跃度展示卡片
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    User[用户请求] --> Nginx[Nginx]
+    Nginx --> App[Spring Boot]
+    App --> Caffeine[Caffeine 本地缓存]
+    App --> Redis[(Redis)]
+    App --> MySQL[(MySQL)]
+    Caffeine --> App
+    Redis --> App
+
+    Seckill[秒杀请求] --> Lua[Redis Lua 原子校验与预扣]
+    Lua --> MQ[RocketMQ]
+    MQ --> Consumer[VoucherOrderConsumer]
+    Consumer --> MySQL
+
+    App --> Actuator[Actuator / Prometheus Endpoint]
+    Actuator --> Prometheus[Prometheus]
+    Prometheus --> Grafana[Grafana]
+```
+
+## 秒杀链路说明
+
+秒杀请求进入后，系统先执行 `seckill.lua`。Lua 脚本在 Redis 内完成库存检查、一人一单校验、库存预扣和用户占位，避免并发请求在 Java 层拆分多个 Redis 操作导致竞态。
+
+Redis 预扣成功后，请求线程生成订单号并投递 RocketMQ 消息。下单链路由 `VoucherOrderConsumer` 异步消费，最终写入 MySQL 并进行数据库库存扣减。这样可以缩短用户请求线程的阻塞时间，把高并发入口压力从 MySQL 前移到 Redis 和 MQ。
+
+一致性保护包括：
+
+- Redis Lua 保证库存预扣与一人一单校验的原子性
+- RocketMQ 解耦请求入口与真实下单链路
+- MySQL 使用 `stock > 0` 条件进行乐观扣减
+- 订单表唯一索引防止重复下单
+- Consumer 侧幂等处理消息重复消费
+- MQ 投递失败时执行 `seckill_rollback.lua` 回滚 Redis 预扣库存和用户占位
+
+更多说明见 [docs/seckill-design.md](docs/seckill-design.md)。
+
+## 多级缓存说明
+
+店铺详情属于高频读场景，系统使用 Caffeine + Redis 的多级缓存设计：
+
+- Caffeine 承接单机热点访问，降低 Redis 往返开销
+- Redis 作为分布式缓存，保证多实例间热点数据可共享
+- 主动失效在店铺更新时删除本地缓存和 Redis 缓存
+- 逻辑过期用于降低缓存击穿风险
+- 通过 Micrometer / Prometheus 观察 Caffeine 命中率、接口耗时和请求量
+
+更多说明见 [docs/cache-design.md](docs/cache-design.md)。
+
+## 压测结果
+
+当前仓库保留压测脚本和结果记录模板，真实性能数据请在本机或目标环境完成压测后填写。
+
+| 场景 | 指标 | 结果 |
+| --- | --- | --- |
+| 商户详情接口 | 改造前 QPS | xxx |
+| 商户详情接口 | 改造后 QPS | xxx |
+| 商户详情接口 | 提升比例 | 约 26.1% |
+| 秒杀链路 | 超卖 | 0 |
+| 秒杀链路 | 重复下单 | 0 |
+
+更多记录模板见 [docs/benchmark.md](docs/benchmark.md)。
+
+## 页面截图
+
+以下截图由前端 Mock 数据页面生成，适合放在 GitHub README 和简历项目说明中。
+
+### 首页
+
+![首页](screenshots/home.png)
+
+### 店铺详情页
+
+![店铺详情页](screenshots/shop-detail.png)
+
+### 限时权益页
+
+![限时权益页](screenshots/deals.png)
+
+### 用户中心页
+
+![用户中心页](screenshots/profile.png)
+
+Grafana 监控页建议在完成真实压测后补充为 `screenshots/grafana.png`。
+
+截图目录说明见 [screenshots/README.md](screenshots/README.md)。
+
+## 快速启动
+
+### 1. 准备基础服务
+
+项目默认依赖：
+
+- MySQL：`127.0.0.1:3306`
+- Redis：`localhost:6379`
+- RocketMQ：`127.0.0.1:9876`
+- Prometheus：`localhost:9090`
+- Grafana：`localhost:3000`
+
+RocketMQ、Prometheus 和 Grafana 可通过 Docker Compose 启动：
+
+```bash
+docker compose up -d
+```
+
+入口地址：
+
+- RocketMQ Dashboard: <http://localhost:8090>
+- Prometheus: <http://localhost:9090>
+- Grafana: <http://localhost:3000>
+
+Grafana 默认账号密码：
+
+```text
+admin / admin
+```
+
+### 2. 初始化 MySQL
+
+创建 `hmdp` 数据库后执行：
 
 ```sql
 source src/main/resources/db/hmdp.sql;
 ```
 
-## 配置方式
-
-公开配置文件是 `src/main/resources/application.yaml`，里面使用环境变量占位：
-
-```yaml
-spring:
-  datasource:
-    url: ${HMDP_MYSQL_URL:jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}
-    username: ${HMDP_MYSQL_USERNAME:root}
-    password: ${HMDP_MYSQL_PASSWORD:}
-```
-
-格式为：
-
-```text
-${环境变量名:默认值}
-```
-
-如果没有设置环境变量，就使用冒号后面的默认值。
-
-本地开发时可以创建一个不会提交的文件：
+如需覆盖本机配置，可创建不会提交的本地配置文件：
 
 ```text
 src/main/resources/application-local.yaml
@@ -103,132 +197,74 @@ spring:
     password: your_mysql_password
 ```
 
-`application-local.yaml` 已被 `.gitignore` 忽略，适合保存本机密码。不要提交真实密码、`.env` 或压测生成的 `tokens.txt`。
+### 3. 启动后端
 
-也可以直接用环境变量启动：
+本项目是 Java 8 / Spring Boot 2.3 项目，请使用 JDK 8 运行 Maven。
 
 ```powershell
-$env:HMDP_MYSQL_PASSWORD = 'your_mysql_password'
-$env:HMDP_REDIS_HOST = 'localhost'
-$env:HMDP_ROCKETMQ_NAME_SERVER = '127.0.0.1:9876'
-mvn spring-boot:run
+$env:JAVA_HOME = 'E:\Users\Administrator\.jdks\corretto-1.8.0_492'
+& 'C:\Users\Administrator\.m2\wrapper\dists\apache-maven-3.9.15-bin\4rlcemksed9vjmkvgss0jpc4po\apache-maven-3.9.15\bin\mvn.cmd' spring-boot:run
 ```
 
-## 启动项目
-
-### 1. 启动 RocketMQ、Prometheus、Grafana
-
-```bash
-docker compose up -d
-```
-
-服务入口：
-
-- RocketMQ Dashboard: <http://localhost:8090>
-- Prometheus: <http://localhost:9090>
-- Grafana: <http://localhost:3000>
-
-Grafana 默认账号密码：
-
-```text
-admin / admin
-```
-
-### 2. 启动 Spring Boot
-
-确保 MySQL、Redis 和 RocketMQ 都已经可访问，然后启动应用：
-
-```bash
-mvn spring-boot:run
-```
-
-默认后端端口是：
+默认后端地址：
 
 ```text
 http://localhost:8081
 ```
 
-常用检查地址：
+健康检查：
 
 ```text
 http://localhost:8081/actuator/health
 http://localhost:8081/actuator/prometheus
 ```
 
-如果 Prometheus 页面里 `hmdp-springboot` target 显示为 `UP`，说明监控抓取正常。
+### 4. 启动前端
 
-## 秒杀压测
-
-### 1. 预热 Redis 库存
-
-新增秒杀券后，服务会将库存写入 Redis：
-
-```text
-seckill:stock:{voucherId}
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-如果你直接改了数据库，需要确认 Redis 里也有对应库存。
-
-### 2. 生成登录 token
-
-测试类 `VoucherOrderControllerTest#loginUsersAndWriteTokens` 会从数据库读取用户手机号，批量登录并生成：
+默认前端地址：
 
 ```text
-src/main/resources/tokens.txt
+http://localhost:5173
 ```
 
-这个文件是本地压测数据，已经被 `.gitignore` 忽略，不要提交。
+前端当前使用 Mock 数据即可独立展示；如后续接入真实接口，可通过 `frontend/vite.config.js` 中的 `/api` 代理访问 Spring Boot。
 
-### 3. 执行压测脚本
+## 压测脚本
 
-脚本默认访问 nginx 代理地址 `http://127.0.0.1:8080/api/...`：
+商户详情接口压测：
+
+```bash
+node scripts/shop-cache-benchmark.mjs --shopId 1 --total 1000 --concurrency 100
+```
+
+秒杀链路压测：
 
 ```bash
 node scripts/seckill-load-test.mjs --voucherId 16 --total 1000 --concurrency 100
 ```
 
-如果直接访问 Spring Boot 后端，可以显式指定 URL：
-
-```bash
-node scripts/seckill-load-test.mjs --url http://127.0.0.1:8081/voucher-order/seckill/16 --total 1000 --concurrency 100
-```
-
-脚本会输出：
-
-- 成功请求数
-- 业务失败数
-- HTTP/网络失败数
-- QPS
-- 平均耗时
-- p50 / p95 / p99 延迟
-- 失败消息分布
-
-## 监控使用
-
-启动应用和 Prometheus 后，打开：
+如果通过 Nginx 访问，秒杀接口通常为：
 
 ```text
-http://localhost:9090/targets
+POST http://127.0.0.1:8080/api/voucher-order/seckill/{voucherId}
 ```
 
-确认 `hmdp-springboot` 为 `UP`。
+如果直接访问 Spring Boot：
 
-常用 Prometheus 查询：
-
-```promql
-http_server_requests_seconds_count
-http_server_requests_seconds_sum
-jvm_memory_used_bytes
-process_cpu_usage
-system_cpu_usage
+```text
+POST http://127.0.0.1:8081/voucher-order/seckill/{voucherId}
 ```
 
-Grafana 已自动配置 Prometheus 数据源，可以在 <http://localhost:3000> 里直接创建 Dashboard。推荐关注：
+## 文档索引
 
-- 秒杀接口请求量和延迟
-- HTTP 4xx/5xx 数量
-- JVM 堆内存使用
-- CPU 使用率
-- RocketMQ Dashboard 中的 Topic、Consumer Group 和消息堆积
-
-
+- [系统架构](docs/architecture.md)
+- [秒杀设计](docs/seckill-design.md)
+- [多级缓存设计](docs/cache-design.md)
+- [压测记录](docs/benchmark.md)
+- [截图说明](screenshots/README.md)

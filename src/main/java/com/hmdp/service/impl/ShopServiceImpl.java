@@ -1,6 +1,7 @@
 package com.hmdp.service.impl;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.github.benmanes.caffeine.cache.Cache;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
@@ -8,6 +9,8 @@ import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.SystemConstants;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.geo.Circle;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.GeoResult;
@@ -37,6 +40,7 @@ import static com.hmdp.utils.RedisConstants.*;
  * @since 2021-12-22
  */
 @Service
+@Slf4j
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
 
     @Resource
@@ -45,12 +49,30 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private CacheClient cacheClient;
 
+    @Resource
+    private Cache<Long,Shop> shopLocalCache;
+
+    @Value("${hmdp.cache.local.enabled:true}")
+    private boolean localCacheEnabled;
+
     @Override
     public Result queryById(Long id) {
+        if (localCacheEnabled) {
+            Shop shopLocal = shopLocalCache.getIfPresent(id);
+            if (shopLocal != null) {
+                log.trace("shop local cache hit, id={}", id);
+                return Result.ok(shopLocal);
+            }
+            log.trace("shop local cache miss, id={}", id);
+        }
+
         Shop shop = cacheClient.queryWithLogicalExpire(
                 CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
         if (shop == null) {
             return Result.fail("店铺不存在！");
+        }
+        if (localCacheEnabled) {
+            shopLocalCache.put(id, shop);
         }
         return Result.ok(shop);
     }
@@ -64,6 +86,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         updateById(shop);
         stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+        if (localCacheEnabled) {
+            shopLocalCache.invalidate(id);
+        }
         return Result.ok();
     }
     @Override

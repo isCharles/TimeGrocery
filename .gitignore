@@ -12,6 +12,11 @@ tokens.txt
 .env
 *.env
 /AGENTS.md
+
+### Frontend ###
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
 ### STS ###
 .apt_generated
 .classpath
