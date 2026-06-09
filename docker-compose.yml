@@ -1,0 +1,55 @@
+services:
+  rocketmq-namesrv:
+    image: apache/rocketmq:4.9.7
+    container_name: rocketmq-namesrv
+    ports:
+      - "9876:9876"
+    command: sh mqnamesrv
+
+  rocketmq-broker:
+    image: apache/rocketmq:4.9.7
+    container_name: rocketmq-broker
+    depends_on:
+      - rocketmq-namesrv
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+    environment:
+      - NAMESRV_ADDR=rocketmq-namesrv:9876
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/broker.conf
+    command: sh mqbroker -c /home/rocketmq/broker.conf
+
+  rocketmq-dashboard:
+    image: apacherocketmq/rocketmq-dashboard:1.0.0
+    container_name: rocketmq-dashboard
+    depends_on:
+      - rocketmq-namesrv
+      - rocketmq-broker
+    ports:
+      - "8090:8080"
+    environment:
+      - JAVA_OPTS=-Drocketmq.namesrv.addr=rocketmq-namesrv:9876
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: hmdp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: hmdp-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
