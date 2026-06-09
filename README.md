@@ -1,4 +1,4 @@
-# hm-dianping
+# 时光杂货铺
 
 基于 Spring Boot 2.3 的点评/秒杀练习项目。项目在原有 Redis 秒杀方案上，补充了 RocketMQ 异步下单链路，并接入 Spring Boot Actuator、Micrometer、Prometheus 和 Grafana，用于观察接口、JVM 和应用运行状态。
 
